@@ -1,0 +1,216 @@
+<html>
+  <head>
+    <link rel="stylesheet" href="style.css">
+
+    <script src="./firebase-config.js"></script>
+
+    <script src="./firebase/firebase-app.js"></script>
+    <script src="./firebase/firebase-auth.js"></script>
+    <script src="./firebase/firebase-storage.js"></script>
+    <script src="./firebase/firebase-firestore.js"></script>
+    <script src="./firebase/firebase-database.js"></script>
+
+    <script src="./simplepeer/simplepeer.min.js"></script>
+
+    <script src="./automerge/automerge.js"></script>
+
+    <!-- json viewer -->
+    <script src="./json-viewer/json-viewer.js"></script>
+    <link rel="stylesheet" href="./json-viewer/json-viewer.css">
+
+
+  </head>
+  <body>
+    <form>
+      <div class="label">Initiate a new document if you don't have a code.</div>
+      <label class="switch">
+          <input id="checkbox" type="checkbox">
+          <span class="slider round"></span>
+      </label>
+      <div class="label">Or input a code you got from a friend.</div>
+      <div id='div-textarea' contenteditable autofocus></div>
+
+      <button id="submit-doc" type="submit-doc" class="button">Submit</button>
+    </form>
+    <div id="json"></div>
+    <script>
+      // strategy is to
+      // 0. connect to firebase app
+      // 1. button to determine initiator, if pressed
+      //    1. a. create a new initiator peer
+      //    1. b. write a new peer id to the database at peerID/
+      //    1. c. create a new Autmerge doc
+      //    1. d. write Automerge doc to the database at automergeDoc/
+      //    1. e. key of Automerge doc is initiator peer id
+      //    1. f. register initiator id as initiator under Automerge doc
+      //    1. g. watch Automerge peers to wait for answer
+      // 2. if session receives text input in the form of an peer id
+      //````2. a. retrieve offer at peerID and set answer
+      //    2. b. set Automerge / peers / answer to answer
+      // 3. profit
+
+      var jsonViewer = new JSONViewer();
+      document.querySelector("#json").appendChild(jsonViewer.getContainer());
+
+      //peer
+      var p;
+
+      window.addEventListener('keyup', function(e){
+        if(e.key != 'Enter') return;
+        let val = document.querySelector('#div-textarea').textContent;
+        if(val == "") return;
+        console.log(val);
+
+        initPeer(val);
+      });
+
+      //initialize firebase app
+      firebase.initializeApp(firebaseConfig);
+
+      var database = firebase.database();
+
+      //will add p._id of other peer to this text field
+      document.querySelector('form').addEventListener('submit', ev => {
+        ev.preventDefault()
+        let val = document.querySelector('#div-textarea').textContent;
+        console.log(val);
+
+        initPeer(val);
+      })
+
+      //will add p._id of other peer to this text field
+      document.getElementById('checkbox').addEventListener('change', ev => {
+        ev.preventDefault()
+        // p.signal(JSON.parse(document.querySelector('#incoming').value))
+        // console.log(ev);
+        initDoc();
+      })
+
+
+      function initDoc(){
+        console.log("Init Doc");
+
+        //sample automerge doc initial state
+        var docInit = {
+          array: ["elmo", "bert", "ernie", "big-bird"],
+          dict: {key:"1223", val:"lala"},
+          bool: false
+        }
+
+        //init autmerge doc
+        var doc = Automerge.from(docInit);
+
+        //create peer
+        p = new SimplePeer({
+          //is peer initiator?
+          initiator: true,
+          trickle: false
+        })
+
+        var initiator = {initiator: p._id};
+        console.log(initiator);
+
+        let pId = document.querySelector('#div-textarea')
+        pId.innerHTML = p._id;
+
+        //copy code to clipboard
+        navigator.clipboard.writeText(p._id);
+
+        //peer error
+        p.on('error', err => console.log('error', err))
+
+        p.on('signal', data => {
+          //write offer to p._id
+          firebase.database().ref('peerID/' + p._id).set({
+            data
+          });
+        });
+
+        p.on('connect', () => {
+          console.log('CONNECT');
+          console.log(doc);
+          p.send(JSON.stringify(doc));
+        })
+
+        p.on('data', data => {
+          console.log('data: ' + data);
+          jsonViewer.showJSON(JSON.parse(data), 10, 6);
+        })
+
+        firebase.database().ref('automergeDoc/' + p._id).set({
+          doc
+        });
+
+        firebase.database().ref('automergeDoc/' + p._id + '/peers/initiator').set({
+          initiator
+        });
+
+        var peersListRef = firebase.database().ref('automergeDoc/' + p._id + '/peers/answer');
+        peersListRef.on('value', function(snapshot) {
+
+          if(snapshot.val() && snapshot.val().answer){
+            let ans = snapshot.val().answer['answer'];
+            //needs timeout otherwise snapshot is undefined
+            setTimeout(function(){resolveInitDoc(ans)}, 500);
+          }
+        });
+      }
+
+      function resolveInitDoc(peerID){
+        firebase.database().ref('peerID/' + peerID).once('value').then(function(snapshot) {
+
+          //seems like if this is called too quickly it fails...
+          if(!snapshot.val()){
+              console.log("wtf");
+              return;
+          }
+          console.log(snapshot.val());
+          p.signal(snapshot.val().data);
+        });
+      }
+
+      function initPeer(peerID){
+        console.log("Init Peer");
+        //create peer
+        p = new SimplePeer({
+          //is peer initiator?
+          initiator: false,
+          trickle: false
+        })
+
+        var answer = {answer: p._id};
+        console.log(answer);
+        firebase.database().ref('peerID/' + peerID).once('value').then(function(snapshot) {
+          console.log(snapshot.val());
+          p.signal(snapshot.val().data);
+        });
+
+        //have to do this after the peerID is written to db
+        //otherwise initiator tries to look for something that doesn't exist
+        firebase.database().ref('automergeDoc/' + peerID + '/peers/answer').set({
+          answer
+        });
+
+        //peer error
+        p.on('error', err => console.log('error', err))
+
+        p.on('signal', data => {
+          console.log('SIGNAL', JSON.stringify(data))
+          //write offer to p._id
+          firebase.database().ref('peerID/' + p._id).set({
+            data
+          });
+        });
+
+        p.on('connect', () => {
+          console.log('CONNECT')
+        })
+
+        p.on('data', data => {
+          console.log('data: ' + data);
+          jsonViewer.showJSON(JSON.parse(data), 10, 6);
+        })
+      }
+    </script>
+  </body>
+</html>
